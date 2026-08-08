@@ -1,0 +1,236 @@
+# reading_notes_skill.py
+
+import re
+from typing import Dict, List, Tuple
+from dataclasses import dataclass
+from collections import Counter
+
+@dataclass
+class NoteConfig:
+    """笔记配置"""
+    max_summary_sentences: int = 5      # 核心要点数量
+    include_keywords: bool = True       # 是否提取关键词
+    include_quotes: bool = True         # 是否摘录金句
+    include_questions: bool = True      # 是否生成思考问题
+    language: str = "zh"                # 输出语言
+
+class SmartReaderSkill:
+    """智能阅读笔记助手"""
+    
+    def __init__(self, config: NoteConfig = None):
+        self.config = config or NoteConfig()
+        self.stop_words = {'的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一', '一个', '上', '也', '很', '到', '说', '要', '去', '你', '会', '着', '没有', '看', '好', '自己', '这', '那', '它', '他', '她'}
+    
+    def process_text(self, text: str, title: str = "未命名材料") -> Dict:
+        """主处理流程"""
+        # 1. 文本清洗
+        cleaned_text = self._clean_text(text)
+        
+        # 2. 分句和分段
+        sentences = self._split_sentences(cleaned_text)
+        paragraphs = self._split_paragraphs(cleaned_text)
+        
+        # 3. 提取核心要点（基于句子重要性评分）
+        core_points = self._extract_core_points(sentences)
+        
+        # 4. 提取关键词
+        keywords = self._extract_keywords(cleaned_text) if self.config.include_keywords else []
+        
+        # 5. 摘录金句（带评分的句子）
+        quotes = self._extract_quotes(sentences) if self.config.include_quotes else []
+        
+        # 6. 生成总结
+        summary = self._generate_summary(core_points)
+        
+        # 7. 生成思考问题
+        questions = self._generate_questions(core_points, keywords) if self.config.include_questions else []
+        
+        return {
+            "title": title,
+            "core_points": core_points,
+            "keywords": keywords,
+            "quotes": quotes,
+            "summary": summary,
+            "questions": questions,
+            "word_count": len(cleaned_text),
+            "paragraph_count": len(paragraphs)
+        }
+    
+    def _clean_text(self, text: str) -> str:
+        """清洗文本"""
+        # 移除多余空白和特殊字符
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'[^\w\s\u4e00-\u9fff\.\，\。\！\？\；\：\“\”\‘\’\（\）]', '', text)
+        return text.strip()
+    
+    def _split_sentences(self, text: str) -> List[str]:
+        """中文分句"""
+        # 使用标点符号分句
+        pattern = r'[。！？\?!;；\n\r]+'
+        sentences = re.split(pattern, text)
+        return [s.strip() for s in sentences if len(s.strip()) > 5]
+    
+    def _split_paragraphs(self, text: str) -> List[str]:
+        """分段"""
+        paragraphs = re.split(r'\n\s*\n', text)
+        return [p.strip() for p in paragraphs if len(p.strip()) > 10]
+    
+    def _extract_core_points(self, sentences: List[str], top_n: int = None) -> List[Dict]:
+        """提取核心要点（基于TF-IDF简化版 + 位置权重）"""
+        if not sentences:
+            return []
+        
+        top_n = top_n or self.config.max_summary_sentences
+        
+        # 1. 计算词频（去除停用词）
+        word_freq = Counter()
+        for sent in sentences:
+            words = re.findall(r'[\u4e00-\u9fff]+', sent)
+            for w in words:
+                if w not in self.stop_words and len(w) > 1:
+                    word_freq[w] += 1
+        
+        # 2. 评分句子（词频得分 + 位置得分）
+        scored = []
+        total_sents = len(sentences)
+        for idx, sent in enumerate(sentences):
+            words = re.findall(r'[\u4e00-\u9fff]+', sent)
+            # 词频得分
+            freq_score = sum(word_freq.get(w, 0) for w in words if w not in self.stop_words)
+            # 位置得分（开头和结尾权重高）
+            pos_score = 1.0
+            if idx < total_sents * 0.2:  # 前20%
+                pos_score = 1.5
+            elif idx > total_sents * 0.8:  # 后20%
+                pos_score = 1.3
+            # 长度惩罚（太短或太长）
+            len_penalty = 1.0
+            if len(sent) < 10:
+                len_penalty = 0.5
+            elif len(sent) > 100:
+                len_penalty = 0.8
+            
+            total_score = freq_score * pos_score * len_penalty
+            scored.append((sent, total_score))
+        
+        # 3. 排序取top_n，并去重（语义相似度简化版）
+        scored.sort(key=lambda x: x[1], reverse=True)
+        
+        # 去重：如果句子开头相似，只保留一个
+        unique_points = []
+        seen_starts = set()
+        for sent, score in scored:
+            start = sent[:10]
+            if start not in seen_starts:
+                seen_starts.add(start)
+                unique_points.append({
+                    "content": sent,
+                    "score": round(score, 2)
+                })
+            if len(unique_points) >= top_n:
+                break
+        
+        return unique_points
+    
+    def _extract_keywords(self, text: str, top_k: int = 10) -> List[str]:
+        """提取关键词（基于词频）"""
+        words = re.findall(r'[\u4e00-\u9fff]+', text)
+        word_freq = Counter(w for w in words if w not in self.stop_words and len(w) > 1)
+        
+        # 过滤掉过于常见的词
+        common_words = {'问题', '内容', '方法', '过程', '结果', '研究', '分析', '数据', '信息', '观点'}
+        for w in common_words:
+            word_freq.pop(w, None)
+        
+        return [w for w, _ in word_freq.most_common(top_k)]
+    
+    def _extract_quotes(self, sentences: List[str], max_quotes: int = 3) -> List[Dict]:
+        """摘录金句（包含'重要'、'关键'、'本质'等词）"""
+        quote_markers = ['重要', '关键', '本质', '核心', '必须', '最', '首先', '因此', '结论', '总结']
+        scored_quotes = []
+        
+        for sent in sentences:
+            score = 0
+            for marker in quote_markers:
+                if marker in sent:
+                    score += 1
+            # 包含数字/数据
+            if re.search(r'\d+', sent):
+                score += 1
+            # 长度适中
+            if 15 < len(sent) < 80:
+                score += 0.5
+            
+            if score > 0:
+                scored_quotes.append((sent, score))
+        
+        scored_quotes.sort(key=lambda x: x[1], reverse=True)
+        return [{"content": q, "score": s} for q, s in scored_quotes[:max_quotes]]
+    
+    def _generate_summary(self, core_points: List[Dict]) -> str:
+        """生成一段总结"""
+        if not core_points:
+            return "无法提取核心要点。"
+        
+        summary = "本文核心要点：\n"
+        for i, point in enumerate(core_points, 1):
+            summary += f"{i}. {point['content']}\n"
+        return summary
+    
+    def _generate_questions(self, core_points: List[Dict], keywords: List[str]) -> List[str]:
+        """生成思考问题"""
+        if not core_points:
+            return []
+        
+        questions = []
+        # 基于核心要点生成问题
+        for point in core_points[:3]:
+            content = point['content']
+            if '是' in content:
+                questions.append(f"如何验证文中的观点：{content[:20]}...？")
+            elif '因为' in content or '所以' in content:
+                questions.append(f"文中的因果关系是否成立？{content[:20]}...")
+            else:
+                questions.append(f"该观点对实际应用有何启示：{content[:20]}...？")
+        
+        # 如果有关键词，生成延伸问题
+        if keywords:
+            questions.append(f"围绕「{', '.join(keywords[:3])}」还有哪些值得深入的方向？")
+        
+        return questions[:4]
+    
+    def format_markdown(self, result: Dict) -> str:
+        """格式化为Markdown笔记"""
+        md = f"# 📖 阅读笔记：{result['title']}\n\n"
+        md += f"**统计**：字数 {result['word_count']} | 段落 {result['paragraph_count']}\n\n"
+        md += "---\n\n"
+        
+        # 核心要点
+        md += "## 🎯 核心要点\n\n"
+        for i, point in enumerate(result['core_points'], 1):
+            md += f"{i}. {point['content']}\n"
+        md += "\n"
+        
+        # 关键词
+        if result.get('keywords'):
+            md += "## 🔑 关键词\n\n"
+            md += "、".join(result['keywords']) + "\n\n"
+        
+        # 金句摘录
+        if result.get('quotes'):
+            md += "## 💬 金句摘录\n\n"
+            for q in result['quotes']:
+                md += f"> {q['content']}\n\n"
+        
+        # 思考问题
+        if result.get('questions'):
+            md += "## 🤔 思考问题\n\n"
+            for q in result['questions']:
+                md += f"- {q}\n"
+            md += "\n"
+        
+        md += "---\n"
+        md += f"*生成时间：{__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}*\n"
+        
+        return md
+
